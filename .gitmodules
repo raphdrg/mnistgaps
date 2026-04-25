@@ -1,0 +1,3 @@
+[submodule "MnistSimpleCNN"]
+	path = MnistSimpleCNN
+	url = https://github.com/ansh941/MnistSimpleCNN.git
