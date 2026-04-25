@@ -9,9 +9,10 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from class_prediction import DonutClassifier, BATCH_SIZE
+from class_prediction import ModelM5, predict_proba, BATCH_SIZE, SEED, VAL_SIZE
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
 OUT_DIR = Path(__file__).resolve().parent / "sample_images"
 OUT_DIR.mkdir(exist_ok=True)
 
@@ -21,27 +22,33 @@ device = torch.device(
     else "cpu"
 )
 
-# Load data
+# Load data — use the same split as training
 images = np.load(DATA_DIR / "train_data.npz")["data"]  # (60000,1,28,28)
 labels = np.load(DATA_DIR / "train_labels.npy")
+
+rng_split = np.random.RandomState(SEED)
+idx = rng_split.permutation(len(images))
+val_idx = idx[:VAL_SIZE]
+
+images = images[val_idx]
+labels = labels[val_idx]
 
 images_t = torch.tensor(images, dtype=torch.float32) / 255.0
 masked = images_t.clone()
 masked[:, :, 10:18, 10:18] = 0.0
 
 # Load model
-model = DonutClassifier()
-ROOT = Path(__file__).resolve().parent.parent
+model = ModelM5()
 model.load_state_dict(torch.load(ROOT / "donut_classifier.pth", map_location=device, weights_only=True))
 model.to(device)
 model.eval()
 
-# Get predictions for all images
+# Get predictions on val set only
 all_probs = []
 with torch.no_grad():
     for i in range(0, len(masked), BATCH_SIZE):
         batch = masked[i : i + BATCH_SIZE].to(device)
-        all_probs.append(model.predict_proba(batch).cpu())
+        all_probs.append(predict_proba(model, batch).cpu())
 all_probs = torch.cat(all_probs)
 all_preds = all_probs.argmax(1).numpy()
 all_confs = all_probs.max(1).values.numpy()
@@ -51,7 +58,7 @@ rng = np.random.default_rng()
 # --- 1) Random predictions grid ---
 idx = rng.choice(len(images), 24, replace=False)
 fig, axes = plt.subplots(4, 6, figsize=(12, 8))
-fig.suptitle("Donut classifier predictions (masked images)", fontsize=14)
+fig.suptitle("Donut classifier predictions (val set, masked images)", fontsize=14)
 for ax, i in zip(axes.flat, idx):
     ax.imshow(masked[i, 0], cmap="gray", vmin=0, vmax=1)
     correct = all_preds[i] == labels[i]
@@ -88,5 +95,5 @@ fig.tight_layout()
 fig.savefig(OUT_DIR / "predictions_confidence.png", dpi=150)
 plt.close(fig)
 
-print(f"Overall accuracy: {(all_preds == labels).mean():.4f}")
+print(f"Val accuracy: {(all_preds == labels).mean():.4f}  ({(all_preds != labels).sum()} mistakes out of {len(labels)})")
 print(f"Saved to {OUT_DIR}")
