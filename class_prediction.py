@@ -1,5 +1,6 @@
-"""Train a CNN to predict digit class (0-9) from the outer donut of masked MNIST images."""
+"""Train ModelM5 to predict digit class (0-9) from the outer donut of masked MNIST images."""
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,11 +9,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+# Import M5 and EMA from submodule
+sys.path.insert(0, str(Path(__file__).resolve().parent / "MnistSimpleCNN" / "code"))
+from models.modelM5 import ModelM5
+from ema import EMA
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BATCH_SIZE = 128
-EPOCHS = 20
+BATCH_SIZE = 120
+EPOCHS = 50
 LR = 1e-3
 SEED = 42
 VAL_SIZE = 5000
@@ -48,58 +54,12 @@ def load_data():
 
 
 # ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
-
-class DonutClassifier(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),                # 14x14
-
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),                # 7x7
-
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),        # 1x1
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 10),
-        )
-
-    def forward(self, x):
-        return self.classifier(self.features(x))
-
-    def predict_proba(self, x):
-        """Return softmax confidence for each class."""
-        with torch.no_grad():
-            logits = self.forward(x)
-            return F.softmax(logits, dim=1)
-
-
-# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
 def train(model, train_x, train_y, val_x, val_y):
     model.to(device)
+    ema = EMA(model, decay=0.999)
 
     train_loader = DataLoader(
         TensorDataset(train_x, train_y),
@@ -107,7 +67,10 @@ def train(model, train_x, train_y, val_x, val_y):
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
+
+    g_step = 0
+    best_val_acc = 0.0
 
     for epoch in range(EPOCHS):
         model.train()
@@ -118,45 +81,64 @@ def train(model, train_x, train_y, val_x, val_y):
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            logits = model(x)
-            loss = criterion(logits, y)
+            output = model(x)
+            loss = F.nll_loss(output, y)
             loss.backward()
             optimizer.step()
+            g_step += 1
+            ema(model, g_step)
 
             total_loss += loss.item() * x.size(0)
-            correct += (logits.argmax(1) == y).sum().item()
+            correct += (output.argmax(1) == y).sum().item()
             total += x.size(0)
 
+        scheduler.step()
         train_acc = correct / total
 
-        # Validation
-        val_acc, val_loss = evaluate(model, val_x, val_y, criterion)
+        # Validation with EMA weights
+        model.eval()
+        ema.assign(model)
+        val_acc, val_loss = evaluate(model, val_x, val_y)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), "donut_classifier.pth")
+        ema.resume(model)
 
         print(
             f"Epoch {epoch + 1:>2}/{EPOCHS}  "
             f"train_loss: {total_loss / total:.4f}  train_acc: {train_acc:.4f}  "
-            f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}"
+            f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}  "
+            f"best: {best_val_acc:.4f}"
         )
 
+    # Load best model
+    model.load_state_dict(torch.load("donut_classifier.pth", map_location=device, weights_only=True))
+    return model
 
-def evaluate(model, x, y, criterion=None):
+
+def evaluate(model, x, y):
     model.eval()
-    if criterion is None:
-        criterion = nn.CrossEntropyLoss()
-
     with torch.no_grad():
         preds_all, loss_sum, total = [], 0.0, 0
         for i in range(0, len(x), BATCH_SIZE):
             bx = x[i : i + BATCH_SIZE].to(device)
             by = y[i : i + BATCH_SIZE].to(device)
-            logits = model(bx)
-            loss_sum += criterion(logits, by).item() * bx.size(0)
-            preds_all.append(logits.argmax(1).cpu())
+            output = model(bx)
+            loss_sum += F.nll_loss(output, by, reduction="sum").item()
+            preds_all.append(output.argmax(1).cpu())
             total += bx.size(0)
 
         preds_all = torch.cat(preds_all)
         acc = (preds_all == y).float().mean().item()
         return acc, loss_sum / total
+
+
+def predict_proba(model, x):
+    """Return softmax confidence for each class."""
+    model.eval()
+    with torch.no_grad():
+        logits = model.get_logits(x)
+        return F.softmax(logits, dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -174,15 +156,12 @@ if __name__ == "__main__":
     print(f"Label distribution (train): {torch.bincount(train_y, minlength=10).tolist()}")
     print(f"Label distribution (val):   {torch.bincount(val_y, minlength=10).tolist()}")
 
-    model = DonutClassifier()
+    model = ModelM5()
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {param_count:,}")
+    print(f"ModelM5 parameters: {param_count:,}")
 
-    train(model, train_x, train_y, val_x, val_y)
-
-    # Save model
-    torch.save(model.state_dict(), "donut_classifier.pth")
-    print("\nSaved model to donut_classifier.pth")
+    model = train(model, train_x, train_y, val_x, val_y)
+    print("\nSaved best model to donut_classifier.pth")
 
     # Show per-class accuracy on validation set
     model.eval()
