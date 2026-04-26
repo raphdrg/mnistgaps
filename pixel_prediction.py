@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-import torchvision.transforms.v2 as T
 
 # Import M5 for generating class predictions
 sys.path.insert(0, str(Path(__file__).resolve().parent / "MnistSimpleCNN" / "code"))
@@ -24,9 +23,9 @@ from class_prediction import predict_proba, SEED, VAL_SIZE
 # Config
 # ---------------------------------------------------------------------------
 BATCH_SIZE = 128
-EPOCHS = 120
+EPOCHS = 100
 LR = 1e-3
-LATENT_DIM = 128
+LATENT_DIM = 256
 DATA_DIR = Path("data")
 
 device = torch.device(
@@ -85,11 +84,6 @@ def load_data():
     return train_images, (val_masked, val_probs, val_confs, val_targets), classifier
 
 
-# Augmentation applied to full images before masking
-augment = T.Compose([
-    T.RandomRotation(15),
-    T.RandomAffine(0, translate=(0.1, 0.1)),
-])
 
 
 # ---------------------------------------------------------------------------
@@ -129,20 +123,16 @@ class ConditionalAutoencoder(nn.Module):
 
         # Compress to latent
         self.to_latent = nn.Sequential(
-            nn.Dropout(0.3),
             nn.Linear(fuse_dim, 512),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
             nn.Linear(512, latent_dim),
             nn.ReLU(inplace=True),
         )
 
         # Decode from latent to 8x8 patch
         self.decoder = nn.Sequential(
-            nn.Dropout(0.3),
             nn.Linear(latent_dim, 512),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
             nn.Linear(512, 1024),
             nn.ReLU(inplace=True),
             nn.Linear(1024, 1 * 8 * 8),
@@ -178,7 +168,7 @@ def train(model, train_images, val_data, classifier):
         batch_size=BATCH_SIZE, shuffle=True,
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR, betas=(0.7, 0.95), weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     best_val_loss = float("inf")
@@ -189,12 +179,9 @@ def train(model, train_images, val_data, classifier):
         total = 0
 
         for (full_imgs,) in train_loader:
-            # Augment full images
-            aug_imgs = augment(full_imgs)
-
             # Extract targets and mask
-            targets = aug_imgs[:, :, 10:18, 10:18].clone()
-            masked = aug_imgs.clone()
+            targets = full_imgs[:, :, 10:18, 10:18].clone()
+            masked = full_imgs.clone()
             masked[:, :, 10:18, 10:18] = 0.0
 
             # Get class predictions from classifier
