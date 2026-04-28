@@ -86,7 +86,7 @@ COLORS = plt.cm.tab10(np.arange(10))
 # 1. t-SNE
 # ═════════════════════════════════════════════════════════════════════════════
 print("Computing t-SNE (this may take a minute)...")
-tsne = TSNE(n_components=2, random_state=SEED, perplexity=40, n_iter=1000)
+tsne = TSNE(n_components=2, random_state=SEED, perplexity=40, max_iter=1000)
 Z2 = tsne.fit_transform(all_latents)
 
 fig, ax = plt.subplots(figsize=(10, 10))
